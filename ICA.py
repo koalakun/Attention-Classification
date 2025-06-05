@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from mne.preprocessing import compute_proj_eog, ICA, annotate_amplitude
 from mne.utils import use_log_level
+import yaml
 
 
 
@@ -25,11 +26,32 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ---------------------- Config ----------------------
+# Load configuration
+with open("e:/intern/config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+
+# Access paths and parameters from config
+mat_dirs = config["paths"]["raw_mat_dirs"]
+fif_dir = config["paths"]["cleaned_data_dir"]
+ica_plot_dir = config["paths"]["ica_plot_dir"]
+features_dir = config["paths"]["features_dir"]
+erp_plot_dir = config["paths"]["erp_plot_dir"]
+
+l_freq = config["preprocessing"]["bandpass_filter"]["l_freq"]
+h_freq = config["preprocessing"]["bandpass_filter"]["h_freq"]
+
+n_components = config["preprocessing"]["ica"]["n_components"]
+random_state = config["preprocessing"]["ica"]["random_state"]
+max_iter = config["preprocessing"]["ica"]["max_iter"]
+
+tmin = config["epoching"]["tmin"]
+tmax = config["epoching"]["tmax"]
+baseline = config["epoching"]["baseline"]
+
 folders = [
     r'C:\Users\user\Downloads\SAIIT\SAIIT',
     r'C:\Users\user\Downloads\SAIIT\__MACOSX\SAIIT'
 ]
-tmin, tmax = -0.3, 0.0  # Pre-stimulus window
 freq_bands = [(0.5, 4), (4, 8), (8, 13), (13, 30), (30, 50)]  # delta to gamma
 
 # Set your fsaverage label directory manually (disable auto-downloads)
@@ -38,19 +60,30 @@ fs_dir = os.path.join(subjects_dir, 'fsaverage')
 label_dir = os.path.join(fs_dir, 'label')
 os.makedirs(label_dir, exist_ok=True)
 
-
+ica_plot_dir = os.path.join(os.path.dirname(__file__), "ica_plots")
+os.makedirs(ica_plot_dir, exist_ok=True)
 
 # ---------------------- Event Extraction ----------------------
 def extract_mne_events(result):
     events = []
+
+    # Check if 'event' exists
+    if not hasattr(result, 'event'):
+        print("⚠️ No 'event' found in this .mat result")
+        return np.empty((0, 3), dtype=int)
+
+    print(f"🔍 Found {len(result.event)} events in result")
+
     for i, evt in enumerate(result.event):
         sample = getattr(evt, 'sample', None)
         value = getattr(evt, 'value', None)
         evt_type = getattr(evt, 'type', None)
+
         try:
             latency = int(sample) if sample is not None else None
         except Exception:
             latency = None
+
         event_code = None
         for candidate in [value, evt_type]:
             try:
@@ -60,13 +93,15 @@ def extract_mne_events(result):
                 break
             except Exception:
                 continue
+
         if latency is not None and event_code is not None:
             events.append([latency, 0, event_code])
-    print(f"Extracted {len(events)} usable events.")
+
+    print(f"✅ Extracted {len(events)} usable events.\n")
     return np.array(events, dtype=int) if events else np.empty((0, 3), dtype=int)
 
 # ---------------------- Load .mat to MNE Raw ----------------------
-def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True):
+def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=None):
     if os.path.basename(file_path).startswith("._"):
         print(f"⏭️  Skipping invalid file: {file_path}")
         return None, None, None
@@ -101,7 +136,7 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True):
                 ch_pos.append([float(x), float(y), float(z)])
         return ch_names, np.array(ch_pos)
 
-    sfp_path = r"C:\Users\user\Downloads\GSN_HydroCel_129.sfp"
+    sfp_path = r"E:\intern\GSN_HydroCel_129.sfp"
     sfp_names, sfp_locs = load_sfp_coordinates(sfp_path)
     montage_dict = dict(zip(sfp_names, sfp_locs))
     custom_montage = mne.channels.make_dig_montage(ch_pos=montage_dict, coord_frame='head')
@@ -127,14 +162,23 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True):
         ica = ICA(n_components=15, random_state=97, max_iter=512)
         ica.fit(raw)
 
-        # (1) Try EOG-like component detection (fallback to frontal EEG)
+        # Save ICA component plot
+        if ica_plot_dir is not None:
+            fig = ica.plot_components(outlines='head', show=False)
+            ica_filename = os.path.splitext(os.path.basename(file_path))[0]
+            save_path = os.path.join(ica_plot_dir, f"{ica_filename}_ica.png")
+            fig.savefig(save_path, dpi=150)
+            plt.close(fig)
+            print(f"📷 Saved ICA plot to {save_path}")
+
+        # Try EOG-like component detection (fallback to frontal EEG)
         eog_inds = []
         if 'Fp1' in raw.ch_names or 'Fp2' in raw.ch_names:
             proxy_ch = 'Fp1' if 'Fp1' in raw.ch_names else 'Fp2'
             eog_inds, _ = ica.find_bads_eog(raw, ch_name=proxy_ch)
             print(f"ICA: Using {proxy_ch} as pseudo-EOG for artifact detection.")
         
-        # (2) Try ECG component detection (optional)
+        # Try ECG component detection
         ecg_inds = []
         try:
             ecg_inds, _ = ica.find_bads_ecg(raw)
@@ -157,7 +201,19 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True):
         artifact_inds = list(set(artifact_inds))
 
         if len(artifact_inds) > 0:
+            # Mark components for exclusion
             ica.exclude = artifact_inds
+
+            # Plot components (with exclusions marked in red)
+            if ica_plot_dir is not None:
+                fig = ica.plot_components(outlines='head', show=False)
+                ica_filename = os.path.splitext(os.path.basename(file_path))[0]
+                save_path = os.path.join(ica_plot_dir, f"{ica_filename}_ica.png")
+                fig.savefig(save_path, dpi=150)
+                plt.close(fig)
+                print(f"Saved ICA plot with exclusions: {save_path}")
+
+            # Now apply ICA to remove artifacts
             raw = ica.apply(raw)
             print(f"ICA: Removed {len(artifact_inds)} artifact components.")
         else:
@@ -179,6 +235,18 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True):
     print(f"Sampling rate: {sfreq}")
     print(f"Number of channels: {len(ch_names)}")
     print(f"First 5 channel labels: {ch_names[:5]}")
+
+    # Save cleaned raw data for reuse (e.g., ERP checking)
+    cleaned_dir = os.path.join(os.path.dirname(__file__), "cleaned_data")
+    os.makedirs(cleaned_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    cleaned_path = os.path.join(cleaned_dir, f"{base_name}_cleaned_raw.fif")
+    try:
+        raw.save(cleaned_path, overwrite=True)
+        print(f"✅ Saved cleaned EEG data to {cleaned_path}")
+    except Exception as e:
+        print(f"❌ Failed to save cleaned EEG: {e}")
+
     return raw, result, sfreq
 
 
@@ -280,7 +348,7 @@ def compute_nonlinear_features(data):
 # ---------------------- Main Processing Function ----------------------
 def process_eeg_file(file_path):
     # Channel-level: average reference
-    raw_chan, result, sfreq = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True)
+    raw_chan, result, sfreq = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=ica_plot_dir)
     if raw_chan is None:
         return None, None
 
@@ -311,6 +379,17 @@ def process_eeg_file(file_path):
             return None, None
         else:
             raise
+
+    # Save preprocessed epochs for later ERP/QA use
+    epochs_dir = os.path.join(os.path.dirname(__file__), "epochs")
+    os.makedirs(epochs_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    epochs_path = os.path.join(epochs_dir, f"{base_name}_epo.fif")
+    try:
+        epochs.save(epochs_path, overwrite=True)
+        print(f"✅ Saved preprocessed epochs to {epochs_path}")
+    except Exception as e:
+        print(f"❌ Failed to save epochs: {e}")
 
     print(f"Extracting features from {len(epochs)} pre-stimulus epochs...")
 
@@ -465,4 +544,3 @@ if __name__ == "__main__":
             ica.fit(raw_chan)
             ica.plot_components(outlines='head', show=False)
             plt.savefig(f"ica_components_{os.path.basename(file_path)}.png")
-
