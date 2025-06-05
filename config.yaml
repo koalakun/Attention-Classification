@@ -1,0 +1,24 @@
+paths:
+  raw_mat_dirs:
+    - "C:/Users/user/Downloads/SAIIT/SAIIT"
+    - "C:/Users/user/Downloads/SAIIT/__MACOSX/SAIIT"
+  cleaned_data_dir: "e:/intern/cleaned_data"
+  ica_plot_dir: "e:/intern/ica_plots"
+  features_dir: "e:/intern/features"
+  erp_plot_dir: "e:/intern/erp_plots"
+
+preprocessing:
+  sfp_path: "E:/intern/GSN_HydroCel_129.sfp"
+  bandpass_filter:
+    l_freq: 1.0
+    h_freq: 40.0
+  ica:
+    n_components: 15
+    random_state: 97
+    max_iter: 512
+  annotate_peak_to_peak_threshold: 100e-6
+
+epoching:
+  tmin: -0.3
+  tmax: 0.0
+  baseline: [null, 0]
