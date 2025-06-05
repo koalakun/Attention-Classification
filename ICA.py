@@ -17,6 +17,7 @@ import seaborn as sns
 from mne.preprocessing import compute_proj_eog, ICA, annotate_amplitude
 from mne.utils import use_log_level
 import yaml
+from datetime import datetime
 
 
 
@@ -36,6 +37,9 @@ fif_dir = config["paths"]["cleaned_data_dir"]
 ica_plot_dir = config["paths"]["ica_plot_dir"]
 features_dir = config["paths"]["features_dir"]
 erp_plot_dir = config["paths"]["erp_plot_dir"]
+epochs_dir = config["paths"]["epochs_dir"]
+qa_log_dir = config["paths"]["qa_log_dir"]
+os.makedirs(qa_log_dir, exist_ok=True)
 
 l_freq = config["preprocessing"]["bandpass_filter"]["l_freq"]
 h_freq = config["preprocessing"]["bandpass_filter"]["h_freq"]
@@ -47,6 +51,8 @@ max_iter = config["preprocessing"]["ica"]["max_iter"]
 tmin = config["epoching"]["tmin"]
 tmax = config["epoching"]["tmax"]
 baseline = config["epoching"]["baseline"]
+
+sfp_path = config["preprocessing"]["sfp_path"]  # <-- Add this line
 
 folders = [
     r'C:\Users\user\Downloads\SAIIT\SAIIT',
@@ -60,7 +66,6 @@ fs_dir = os.path.join(subjects_dir, 'fsaverage')
 label_dir = os.path.join(fs_dir, 'label')
 os.makedirs(label_dir, exist_ok=True)
 
-ica_plot_dir = os.path.join(os.path.dirname(__file__), "ica_plots")
 os.makedirs(ica_plot_dir, exist_ok=True)
 
 # ---------------------- Event Extraction ----------------------
@@ -101,7 +106,7 @@ def extract_mne_events(result):
     return np.array(events, dtype=int) if events else np.empty((0, 3), dtype=int)
 
 # ---------------------- Load .mat to MNE Raw ----------------------
-def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=None):
+def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=None, sfp_path=None):
     if os.path.basename(file_path).startswith("._"):
         print(f"⏭️  Skipping invalid file: {file_path}")
         return None, None, None
@@ -122,7 +127,7 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types=['eeg'] * len(ch_names))
     raw = mne.io.RawArray(data, info)
 
-    # Load custom .sfp coordinates manually
+    # Load custom .sfp coordinates from YAML-defined path
     def load_sfp_coordinates(sfp_path):
         ch_names = []
         ch_pos = []
@@ -134,12 +139,16 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
                 ch_name, x, y, z = parts
                 ch_names.append(ch_name)
                 ch_pos.append([float(x), float(y), float(z)])
-        return ch_names, np.array(ch_pos)
+        return dict(zip(ch_names, ch_pos))
 
-    sfp_path = r"E:\intern\GSN_HydroCel_129.sfp"
-    sfp_names, sfp_locs = load_sfp_coordinates(sfp_path)
-    montage_dict = dict(zip(sfp_names, sfp_locs))
-    custom_montage = mne.channels.make_dig_montage(ch_pos=montage_dict, coord_frame='head')
+    # Use YAML-defined path
+    sfp_coords = load_sfp_coordinates(sfp_path)
+
+    # Filter SFP montage to only include existing raw channels
+    filtered_montage = {name: pos for name, pos in sfp_coords.items() if name in raw.ch_names}
+
+    # Create and apply the custom montage
+    custom_montage = mne.channels.make_dig_montage(ch_pos=filtered_montage, coord_frame='head')
     raw.set_montage(custom_montage, on_missing='ignore')
 
     # 1. Apply bandpass filter (1–40 Hz) early for all processing
@@ -346,58 +355,25 @@ def compute_nonlinear_features(data):
     return features
 
 # ---------------------- Main Processing Function ----------------------
-def process_eeg_file(file_path):
-    # Channel-level: average reference
-    raw_chan, result, sfreq = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=ica_plot_dir)
-    if raw_chan is None:
-        return None, None
+def save_qa_log(log_lines, qa_log_dir, base_name):
+    log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa.txt")
+    with open(log_file_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(log_lines))
+    print(f"📄 QA log saved to {log_file_path}")
 
+def save_cleaned_raw(raw, cleaned_dir, base_name):
+    os.makedirs(cleaned_dir, exist_ok=True)
+    cleaned_path = os.path.join(cleaned_dir, f"{base_name}_cleaned_raw.fif")
     try:
-        mapped = set(raw_chan.get_montage().ch_names) & set(raw_chan.info['ch_names'])
-        if len(mapped) == 0:
-            raise ValueError("No valid EEG positions matched with standard montage.")
+        raw.save(cleaned_path, overwrite=True)
+        print(f"✅ Saved cleaned EEG data to {cleaned_path}")
     except Exception as e:
-        print(f"Skipping source localization due to montage mismatch: {e}")
-        source_features = None
+        print(f"❌ Failed to save cleaned EEG: {e}")
 
-    events = extract_mne_events(result)
-    if len(events) == 0:
-        print("No usable events.")
-        return None, None
-
-    event_id = {str(e): e for e in np.unique(events[:, 2]) if e != 999}
-    try:
-        epochs = mne.Epochs(
-            raw_chan, events, event_id=event_id,
-            tmin=tmin, tmax=tmax, baseline=None, preload=True,
-            event_repeated='drop',
-            reject_by_annotation=True  # <--- This line enables segment rejection
-        )
-    except RuntimeError as e:
-        if 'Event time samples were not unique' in str(e):
-            print(f"Duplicate event timestamps detected in {os.path.basename(file_path)}. Dropping repeated events.")
-            return None, None
-        else:
-            raise
-
-    # Save preprocessed epochs for later ERP/QA use
-    epochs_dir = os.path.join(os.path.dirname(__file__), "epochs")
-    os.makedirs(epochs_dir, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    epochs_path = os.path.join(epochs_dir, f"{base_name}_epo.fif")
-    try:
-        epochs.save(epochs_path, overwrite=True)
-        print(f"✅ Saved preprocessed epochs to {epochs_path}")
-    except Exception as e:
-        print(f"❌ Failed to save epochs: {e}")
-
-    print(f"Extracting features from {len(epochs)} pre-stimulus epochs...")
-
-    # --------- Channel-level features ---------
+def extract_channel_features(epochs, sfreq, freq_bands):
     channel_features = []
     for data in epochs.get_data():
         feats = []
-        # Time features per channel
         for ch in data:
             feats += list(np.ravel(extract_time_features(ch)))
         feats += list(np.ravel(bandpower(data, sfreq, freq_bands)))
@@ -419,11 +395,10 @@ def process_eeg_file(file_path):
             print(f"Skipping one epoch due to invalid features (NaN/Inf).")
             continue
         channel_features.append(feats)
-    channel_features = np.array(channel_features)
+    return np.array(channel_features)
 
-    # --------- Source-level features ---------
-    # For source localization, DO NOT apply average reference at this point
-    raw_src, result_src, sfreq_src = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=False)
+def extract_source_features(file_path, mapped, tmin, tmax, baseline, sfp_path, subjects_dir):
+    raw_src, result_src, sfreq_src = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=False, sfp_path=sfp_path)
     source_features = None
     if raw_src is not None and len(mapped) > 0:
         try:
@@ -431,7 +406,7 @@ def process_eeg_file(file_path):
             event_id_src = {str(e): e for e in np.unique(events_src[:, 2]) if e != 999}
             epochs_src = mne.Epochs(
                 raw_src, events_src, event_id=event_id_src,
-                tmin=tmin, tmax=tmax, baseline=None, preload=True,
+                tmin=tmin, tmax=tmax, baseline=baseline, preload=True,
                 event_repeated='drop'
             )
             import nibabel
@@ -459,19 +434,15 @@ def process_eeg_file(file_path):
                 evoked = mne.EvokedArray(epoch, raw_src.info, tmin=epochs_src.times[0])
                 with use_log_level('WARNING'):
                     stc = apply_inverse(evoked, inverse_operator, lambda2, method=method)
-                    # Only load labels once per process
-                    if not hasattr(process_eeg_file, "labels"):
-                        print("Using subjects_dir:", subjects_dir)
+                    if not hasattr(extract_source_features, "labels"):
                         lh_annot = os.path.join(subjects_dir, 'fsaverage', 'label', 'lh.Schaefer2018_100Parcels_7Networks.annot')
                         rh_annot = os.path.join(subjects_dir, 'fsaverage', 'label', 'rh.Schaefer2018_100Parcels_7Networks.annot')
-
                         if not os.path.isfile(lh_annot) or not os.path.isfile(rh_annot):
                             raise FileNotFoundError("Schaefer annotation files not found in label folder. Please check paths.")
-
                         labels_lh = mne.read_labels_from_annot('fsaverage', 'Schaefer2018_100Parcels_7Networks', hemi='lh', subjects_dir=subjects_dir)
                         labels_rh = mne.read_labels_from_annot('fsaverage', 'Schaefer2018_100Parcels_7Networks', hemi='rh', subjects_dir=subjects_dir)
-                        process_eeg_file.labels = labels_lh + labels_rh
-                    labels = process_eeg_file.labels
+                        extract_source_features.labels = labels_lh + labels_rh
+                    labels = extract_source_features.labels
                     parcel_ts = stc.extract_label_time_course(labels, src, mode='mean')
                 source_feats = np.concatenate([np.mean(parcel_ts, axis=1), np.std(parcel_ts, axis=1)])
                 source_feats = np.nan_to_num(source_feats, nan=0.0, posinf=0.0, neginf=0.0)
@@ -483,13 +454,86 @@ def process_eeg_file(file_path):
         except Exception as e:
             print(f"⚠️ Source localization failed: {e}")
             source_features = None
+    return source_features
 
+def process_eeg_file(file_path):
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    log_lines = [f"\n📄 QA Log for {base_name}"]
+
+    # Channel-level: average reference
+    raw_chan, result, sfreq = load_mat_to_mne(
+        file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=ica_plot_dir, sfp_path=sfp_path
+    )
+    if raw_chan is None:
+        log_lines.append(f"❌ Failed to load file: {file_path}")
+        save_qa_log(log_lines, qa_log_dir, base_name)
+        return None, None
+
+    log_lines.append(f"✅ Loaded file: {file_path}")
+    log_lines.append(f"➡️ Filtered {l_freq}–{h_freq} Hz, {raw_chan.info['nchan']} channels")
+
+    try:
+        mapped = set(raw_chan.get_montage().ch_names) & set(raw_chan.info['ch_names'])
+        if len(mapped) == 0:
+            raise ValueError("No valid EEG positions matched with standard montage.")
+    except Exception as e:
+        log_lines.append(f"❌ Montage mismatch: {e}")
+        print(f"Skipping source localization due to montage mismatch: {e}")
+        source_features = None
+
+    events = extract_mne_events(result)
+    if len(events) == 0:
+        log_lines.append("❌ No usable events")
+        save_qa_log(log_lines, qa_log_dir, base_name)
+        return None, None
+
+    event_id = {str(e): e for e in np.unique(events[:, 2]) if e != 999}
+    try:
+        epochs = mne.Epochs(
+            raw_chan, events, event_id=event_id,
+            tmin=tmin, tmax=tmax, baseline=baseline, preload=True,
+            event_repeated='drop',
+            reject_by_annotation=True
+        )
+    except RuntimeError as e:
+        if 'Event time samples were not unique' in str(e):
+            log_lines.append("❌ Duplicate event timestamps detected. Dropping repeated events.")
+            print(f"Duplicate event timestamps detected in {os.path.basename(file_path)}. Dropping repeated events.")
+            save_qa_log(log_lines, qa_log_dir, base_name)
+            return None, None
+        else:
+            log_lines.append(f"⚠️ Epoching failed: {str(e)}")
+            raise
+
+    os.makedirs(epochs_dir, exist_ok=True)
+    epochs_path = os.path.join(epochs_dir, f"{base_name}_epo.fif")
+    try:
+        epochs.save(epochs_path, overwrite=True)
+        log_lines.append(f"✅ Saved epochs to: {epochs_path}")
+        log_lines.append(f"🧠 Extracted {len(epochs)} valid epochs")
+    except Exception as e:
+        log_lines.append(f"❌ Failed to save epochs: {e}")
+
+    print(f"Extracting features from {len(epochs)} pre-stimulus epochs...")
+
+    # --------- Channel-level features ---------
+    channel_features = extract_channel_features(epochs, sfreq, freq_bands)
+
+    # --------- Source-level features ---------
+    source_features = extract_source_features(
+        file_path, mapped, tmin, tmax, baseline, sfp_path, subjects_dir
+    )
+
+    save_qa_log(log_lines, qa_log_dir, base_name)
     return channel_features, source_features
 
 # ---------------------- Main Execution ----------------------
 if __name__ == "__main__":
     save_dir = os.path.join(os.path.dirname(__file__), "features")
     os.makedirs(save_dir, exist_ok=True)
+
+    # Add run_id for this execution
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     mat_files = []
     for folder in folders:
@@ -540,7 +584,7 @@ if __name__ == "__main__":
         file_path = mat_files[-1]
         raw_chan, result, sfreq = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True)
         if raw_chan is not None:
-            ica = ICA(n_components=15, random_state=97, max_iter=512)
+            ica = ICA(n_components=n_components, random_state=random_state, max_iter=max_iter)
             ica.fit(raw_chan)
             ica.plot_components(outlines='head', show=False)
             plt.savefig(f"ica_components_{os.path.basename(file_path)}.png")
