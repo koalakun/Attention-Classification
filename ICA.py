@@ -104,7 +104,7 @@ def extract_mne_events(result):
     return np.array(events, dtype=int) if events else np.empty((0, 3), dtype=int)
 
 # ---------------------- Load .mat to MNE Raw ----------------------
-def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=None, sfp_path=None):
+def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=None, sfp_path=None, return_ica=False):
     if os.path.basename(file_path).startswith("._"):
         print(f"⏭️  Skipping invalid file: {file_path}")
         return None, None, None
@@ -165,6 +165,7 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
 
 
     # 3. ICA artifact removal
+    ica = None
     try:
         ica = ICA(n_components=15, random_state=97, max_iter=512)
         ica.fit(raw)
@@ -192,10 +193,12 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
         scores = ica.get_sources(raw).get_data()
         kurtosis_scores = np.apply_along_axis(kurtosis, 1, scores)
         high_kurtosis = np.where(np.abs(kurtosis_scores) > 3)[0].tolist()
+        print(f"Kurtosis scores: {np.round(kurtosis_scores, 2)}")
         print(f"ICA: Detected {len(high_kurtosis)} components with high kurtosis.")
         artifact_inds += high_kurtosis
 
         artifact_inds = list(set(artifact_inds))
+        print(f"ICA: Final artifact indices to exclude: {artifact_inds}")
 
         if len(artifact_inds) > 0:
             # Mark components for exclusion
@@ -219,7 +222,6 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     except Exception as e:
         print(f"ICA artifact removal skipped or failed: {e}")
 
-
     # Optionally reset any existing bads
     raw.info['bads'] = []
 
@@ -234,7 +236,7 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     print(f"First 5 channel labels: {ch_names[:5]}")
 
     # Save cleaned raw data for reuse (e.g., ERP checking)
-    return raw, result, sfreq
+    return raw, result, sfreq, ica
 
 
 # ---------------------- Feature Extraction Functions ----------------------
@@ -334,7 +336,10 @@ def compute_nonlinear_features(data):
 
 # ---------------------- Main Processing Function ----------------------
 def save_qa_log(log_lines, qa_log_dir, base_name, run_id=None):
+    # Always include Run ID at the top of the log if provided
     if run_id:
+        if not any(f"Run ID:" in line for line in log_lines):
+            log_lines.insert(0, f"Run ID: {run_id}")
         log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa_{run_id}.txt")
     else:
         log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa.txt")
@@ -378,18 +383,10 @@ def extract_channel_features(epochs, sfreq, freq_bands):
         channel_features.append(feats)
     return np.array(channel_features)
 
-def extract_source_features(file_path, mapped, tmin, tmax, baseline, sfp_path, subjects_dir):
-    raw_src, result_src, sfreq_src = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=False, sfp_path=sfp_path)
+def extract_source_features(epochs_src, raw_src, mapped, subjects_dir):
     source_features = None
     if raw_src is not None and len(mapped) > 0:
         try:
-            events_src = extract_mne_events(result_src)
-            event_id_src = {str(e): e for e in np.unique(events_src[:, 2]) if e != 999}
-            epochs_src = mne.Epochs(
-                raw_src, events_src, event_id=event_id_src,
-                tmin=tmin, tmax=tmax, baseline=baseline, preload=True,
-                event_repeated='drop'
-            )
             import nibabel
             noise_cov = mne.compute_covariance(epochs_src, tmax=0.0)
             fs_dir = os.path.join(subjects_dir, 'fsaverage')
@@ -442,7 +439,7 @@ def process_eeg_file(file_path, run_id):
     log_lines = [f"\n📄 QA Log for {base_name}"]
 
     # Channel-level: average reference
-    raw_chan, result, sfreq = load_mat_to_mne(
+    raw_chan, result, sfreq, ica = load_mat_to_mne(
         file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=ica_plot_dir, sfp_path=sfp_path
     )
     save_cleaned_raw(raw_chan, fif_dir, base_name)
@@ -509,7 +506,7 @@ def process_eeg_file(file_path, run_id):
 
     # --------- Source-level features ---------
     source_features = extract_source_features(
-        file_path, mapped, tmin, tmax, baseline, sfp_path, subjects_dir
+        epochs, raw_chan, mapped, subjects_dir
     )
 
     save_qa_log(log_lines, qa_log_dir, base_name, run_id)
