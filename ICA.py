@@ -11,9 +11,7 @@ from mne.minimum_norm import make_inverse_operator, apply_inverse
 from tqdm import tqdm
 import warnings
 from mne import read_bem_solution
-import urllib.request
 import matplotlib.pyplot as plt
-import seaborn as sns
 from mne.preprocessing import compute_proj_eog, ICA, annotate_amplitude
 from mne.utils import use_log_level
 import yaml
@@ -28,11 +26,14 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ---------------------- Config ----------------------
 # Load configuration
-with open("e:/intern/config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+try:
+    with open("e:/intern/config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    raise RuntimeError(f"❌ Failed to load config.yaml: {e}")
 
 # Access paths and parameters from config
-mat_dirs = config["paths"]["raw_mat_dirs"]
+folders = config["paths"]["raw_mat_dirs"]
 fif_dir = config["paths"]["cleaned_data_dir"]
 ica_plot_dir = config["paths"]["ica_plot_dir"]
 features_dir = config["paths"]["features_dir"]
@@ -54,10 +55,7 @@ baseline = config["epoching"]["baseline"]
 
 sfp_path = config["preprocessing"]["sfp_path"]  # <-- Add this line
 
-folders = [
-    r'C:\Users\user\Downloads\SAIIT\SAIIT',
-    r'C:\Users\user\Downloads\SAIIT\__MACOSX\SAIIT'
-]
+
 freq_bands = [(0.5, 4), (4, 8), (8, 13), (13, 30), (30, 50)]  # delta to gamma
 
 # Set your fsaverage label directory manually (disable auto-downloads)
@@ -152,7 +150,7 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     raw.set_montage(custom_montage, on_missing='ignore')
 
     # 1. Apply bandpass filter (1–40 Hz) early for all processing
-    raw.filter(1., 40., fir_design='firwin')
+    raw.filter(l_freq, h_freq, fir_design='firwin')
 
     # 2. Set average EEG reference only if requested
     if apply_avg_ref:
@@ -170,16 +168,6 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     try:
         ica = ICA(n_components=15, random_state=97, max_iter=512)
         ica.fit(raw)
-
-        # Save ICA component plot
-        if ica_plot_dir is not None:
-            fig = ica.plot_components(outlines='head', show=False)
-            ica_filename = os.path.splitext(os.path.basename(file_path))[0]
-            save_path = os.path.join(ica_plot_dir, f"{ica_filename}_ica.png")
-            fig.savefig(save_path, dpi=150)
-            plt.close(fig)
-            print(f"📷 Saved ICA plot to {save_path}")
-
         # Try EOG-like component detection (fallback to frontal EEG)
         eog_inds = []
         if 'Fp1' in raw.ch_names or 'Fp2' in raw.ch_names:
@@ -246,16 +234,6 @@ def load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir
     print(f"First 5 channel labels: {ch_names[:5]}")
 
     # Save cleaned raw data for reuse (e.g., ERP checking)
-    cleaned_dir = os.path.join(os.path.dirname(__file__), "cleaned_data")
-    os.makedirs(cleaned_dir, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    cleaned_path = os.path.join(cleaned_dir, f"{base_name}_cleaned_raw.fif")
-    try:
-        raw.save(cleaned_path, overwrite=True)
-        print(f"✅ Saved cleaned EEG data to {cleaned_path}")
-    except Exception as e:
-        print(f"❌ Failed to save cleaned EEG: {e}")
-
     return raw, result, sfreq
 
 
@@ -355,8 +333,11 @@ def compute_nonlinear_features(data):
     return features
 
 # ---------------------- Main Processing Function ----------------------
-def save_qa_log(log_lines, qa_log_dir, base_name):
-    log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa.txt")
+def save_qa_log(log_lines, qa_log_dir, base_name, run_id=None):
+    if run_id:
+        log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa_{run_id}.txt")
+    else:
+        log_file_path = os.path.join(qa_log_dir, f"{base_name}_qa.txt")
     with open(log_file_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(log_lines))
     print(f"📄 QA log saved to {log_file_path}")
@@ -456,7 +437,7 @@ def extract_source_features(file_path, mapped, tmin, tmax, baseline, sfp_path, s
             source_features = None
     return source_features
 
-def process_eeg_file(file_path):
+def process_eeg_file(file_path, run_id):
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     log_lines = [f"\n📄 QA Log for {base_name}"]
 
@@ -464,9 +445,10 @@ def process_eeg_file(file_path):
     raw_chan, result, sfreq = load_mat_to_mne(
         file_path, apply_avg_ref=True, apply_proj=True, ica_plot_dir=ica_plot_dir, sfp_path=sfp_path
     )
+    save_cleaned_raw(raw_chan, fif_dir, base_name)
     if raw_chan is None:
         log_lines.append(f"❌ Failed to load file: {file_path}")
-        save_qa_log(log_lines, qa_log_dir, base_name)
+        save_qa_log(log_lines, qa_log_dir, base_name, run_id)
         return None, None
 
     log_lines.append(f"✅ Loaded file: {file_path}")
@@ -479,12 +461,13 @@ def process_eeg_file(file_path):
     except Exception as e:
         log_lines.append(f"❌ Montage mismatch: {e}")
         print(f"Skipping source localization due to montage mismatch: {e}")
+        mapped = set() 
         source_features = None
 
     events = extract_mne_events(result)
     if len(events) == 0:
         log_lines.append("❌ No usable events")
-        save_qa_log(log_lines, qa_log_dir, base_name)
+        save_qa_log(log_lines, qa_log_dir, base_name, run_id)
         return None, None
 
     event_id = {str(e): e for e in np.unique(events[:, 2]) if e != 999}
@@ -499,7 +482,7 @@ def process_eeg_file(file_path):
         if 'Event time samples were not unique' in str(e):
             log_lines.append("❌ Duplicate event timestamps detected. Dropping repeated events.")
             print(f"Duplicate event timestamps detected in {os.path.basename(file_path)}. Dropping repeated events.")
-            save_qa_log(log_lines, qa_log_dir, base_name)
+            save_qa_log(log_lines, qa_log_dir, base_name, run_id)
             return None, None
         else:
             log_lines.append(f"⚠️ Epoching failed: {str(e)}")
@@ -519,17 +502,22 @@ def process_eeg_file(file_path):
     # --------- Channel-level features ---------
     channel_features = extract_channel_features(epochs, sfreq, freq_bands)
 
+    # Check for consistent feature shapes
+    feature_shapes = [feats.shape for feats in channel_features]
+    if len(set(feature_shapes)) > 1:
+        print(f"⚠️ Feature vector shapes vary in {base_name}: {set(feature_shapes)}")
+
     # --------- Source-level features ---------
     source_features = extract_source_features(
         file_path, mapped, tmin, tmax, baseline, sfp_path, subjects_dir
     )
 
-    save_qa_log(log_lines, qa_log_dir, base_name)
+    save_qa_log(log_lines, qa_log_dir, base_name, run_id)
     return channel_features, source_features
 
 # ---------------------- Main Execution ----------------------
 if __name__ == "__main__":
-    save_dir = os.path.join(os.path.dirname(__file__), "features")
+    save_dir = features_dir
     os.makedirs(save_dir, exist_ok=True)
 
     # Add run_id for this execution
@@ -547,14 +535,14 @@ if __name__ == "__main__":
     all_source_feats = []
 
     for file_path in tqdm(mat_files, desc="Processing files"):
-        ch_feats, src_feats = process_eeg_file(file_path)
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        ch_feats, src_feats = process_eeg_file(file_path, run_id)
         
         if ch_feats is not None and len(ch_feats) > 0:
             all_channel_feats.append(ch_feats)
             print(f"\n✅ Channel-level feature matrix shape: {ch_feats.shape}")
             print("🧠 First channel-level feature vector (truncated):")
             print(ch_feats[0][:10])
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
             np.save(os.path.join(save_dir, f"channel_{base_name}.npy"), ch_feats)
 
         if src_feats is not None and len(src_feats) > 0:
@@ -562,29 +550,18 @@ if __name__ == "__main__":
             print(f"\n✅ Source-level feature matrix shape: {src_feats.shape}")
             print("🧠 First source-level feature vector (truncated):")
             print(src_feats[0][:10])
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
             np.save(os.path.join(save_dir, f"source_{base_name}.npy"), src_feats)
 
     if all_channel_feats:
         all_ch = np.concatenate(all_channel_feats, axis=0)
         all_ch = np.nan_to_num(all_ch)
-        ch_save_path = os.path.join(os.path.dirname(__file__), f"pre_stim_features_channel_{len(all_ch)}.npy")
+        ch_save_path = os.path.join(save_dir, f"pre_stim_features_channel_{len(all_ch)}.npy")
         np.save(ch_save_path, all_ch)
         print(f"\nSaved all channel-level features: {all_ch.shape} to {ch_save_path}")
 
     if all_source_feats:
         all_src = np.concatenate(all_source_feats, axis=0)
         all_src = np.nan_to_num(all_src)
-        src_save_path = os.path.join(os.path.dirname(__file__), f"pre_stim_features_source_{len(all_src)}.npy")
+        src_save_path = os.path.join(save_dir, f"pre_stim_features_source_{len(all_src)}.npy")
         np.save(src_save_path, all_src)
         print(f"\nSaved all source-level features: {all_src.shape} to {src_save_path}")
-
-    # Plot ICA components for the last processed file
-    if len(mat_files) > 0:
-        file_path = mat_files[-1]
-        raw_chan, result, sfreq = load_mat_to_mne(file_path, apply_avg_ref=True, apply_proj=True)
-        if raw_chan is not None:
-            ica = ICA(n_components=n_components, random_state=random_state, max_iter=max_iter)
-            ica.fit(raw_chan)
-            ica.plot_components(outlines='head', show=False)
-            plt.savefig(f"ica_components_{os.path.basename(file_path)}.png")
