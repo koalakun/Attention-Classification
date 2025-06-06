@@ -6,6 +6,9 @@ paths:
   ica_plot_dir: "e:/intern/ica_plots"
   features_dir: "e:/intern/features"
   erp_plot_dir: "e:/intern/erp_plots"
+  epochs_dir: "e:/intern/epochs"
+  qa_log_dir: "e:/intern/qa_logs"
+  erp_visualizations: "e:/intern/erp_visualizations"
 
 preprocessing:
   sfp_path: "E:/intern/GSN_HydroCel_129.sfp"
