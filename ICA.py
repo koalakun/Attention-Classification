@@ -422,9 +422,30 @@ def extract_source_features(epochs_src, raw_src, mapped, subjects_dir):
                         extract_source_features.labels = labels_lh + labels_rh
                     labels = extract_source_features.labels
                     parcel_ts = stc.extract_label_time_course(labels, src, mode='mean')
+                # Save full time series for this epoch group (all epochs, all parcels, all times)
+                ts_save_path = os.path.join(features_dir, f"source_{base_name}.npy")
+                if not os.path.exists(ts_save_path):
+                    np.save(ts_save_path, parcel_ts)
+                    print(f"💾 Saved parcel time series to: {ts_save_path}")
+
+                # Also compute summary features
                 source_feats = np.concatenate([np.mean(parcel_ts, axis=1), np.std(parcel_ts, axis=1)])
                 source_feats = np.nan_to_num(source_feats, nan=0.0, posinf=0.0, neginf=0.0)
                 source_features.append(source_feats)
+
+                # Accumulate parcel time series across epochs
+                if not hasattr(extract_source_features, "ts_buffer"):
+                    extract_source_features.ts_buffer = []
+
+                extract_source_features.ts_buffer.append(parcel_ts)
+
+                # After all epochs, save combined time series
+                if i == len(epochs_src.get_data()) - 1:  # last epoch
+                    full_ts = np.concatenate(extract_source_features.ts_buffer, axis=1)  # (n_parcels, total_time)
+                    ts_save_path = os.path.join(features_dir, f"source_{base_name}.npy")
+                    np.save(ts_save_path, full_ts)
+                    print(f"💾 Saved full parcel time series to: {ts_save_path}")
+                    del extract_source_features.ts_buffer
             source_features = np.array(source_features)
         except ImportError:
             print("⚠️ nibabel is required for source localization. Run: pip install nibabel")
@@ -547,7 +568,7 @@ if __name__ == "__main__":
             print(f"\n✅ Source-level feature matrix shape: {src_feats.shape}")
             print("🧠 First source-level feature vector (truncated):")
             print(src_feats[0][:10])
-            np.save(os.path.join(save_dir, f"source_{base_name}.npy"), src_feats)
+            np.save(os.path.join(save_dir, f"pre_stim_features_source_{base_name}.npy"), src_feats)
 
     if all_channel_feats:
         all_ch = np.concatenate(all_channel_feats, axis=0)
