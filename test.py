@@ -68,7 +68,8 @@ if ica_plots:
 else:
     print("❌ ICA plot with timestamp not found!")
 
-# ---------------- STEP 4: Confirm exclusions exist ----------------
+# ---------------- STEP 4: 
+#  ----------------
 if hasattr(ica, "exclude") and ica.exclude:
     print(f"\n🧠 ICA Exclusions: {ica.exclude} ✅")
 else:
@@ -88,3 +89,16 @@ if os.path.exists(feat_source):
         print("❌ Source feature file is empty!")
     else:
         print(f"✅ Source feature file loaded with shape: {source_data.shape}")
+
+# ---------------- STEP 7: Load and concatenate all source feature files ----------------
+feature_files = glob.glob(r"E:/intern/features/source_*.npy")
+
+all_feats = []
+for fpath in feature_files:
+    data = np.load(fpath)
+    all_feats.append(data)
+    print(f"Loaded {fpath}: {data.shape}")
+
+# Concatenate along the first axis (epochs)
+X = np.vstack(all_feats)
+print(f"✅ Concatenated feature matrix: {X.shape}")
