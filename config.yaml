@@ -1,14 +1,21 @@
 paths:
   raw_mat_dirs:
     - "C:/Users/user/Downloads/SAIIT/SAIIT"
-    - "C:/Users/user/Downloads/SAIIT/__MACOSX/SAIIT"
+  behavioral_mat_dirs:
+    - "E:/intern/SAIIT_behavioural/SAIIT_behavioural"
   cleaned_data_dir: "e:/intern/cleaned_data"
   ica_plot_dir: "e:/intern/ica_plots"
   features_dir: "e:/intern/features"
   erp_plot_dir: "e:/intern/erp_plots"
   epochs_dir: "e:/intern/epochs"
+  plv_viz_dir: "e:/intern/plv_viz"
   qa_log_dir: "e:/intern/qa_logs"
   erp_visualizations: "e:/intern/erp_visualizations"
+  tfr_data_dir: "e:/intern/tfr_data"
+  rt_csv: "e:/intern/outputs/behavioral_reaction_times.csv"
+  label_csv: "e:/intern/outputs/reaction_time_labels.csv"
+  merged_dataset: "e:/intern/outputs/merged_graph_features_with_labels.csv"
+  graph_features_csv: "e:/intern/plv_graph_features_ALL_FILES.csv"
 
 preprocessing:
   sfp_path: "E:/intern/GSN_HydroCel_129.sfp"
@@ -25,3 +32,9 @@ epoching:
   tmin: -0.3
   tmax: 0.0
   baseline: [null, 0]
+
+params:
+  sfreq: 500
+  window_size: 0.3 
+  step_size: 0.05
+  plv_threshold: 0.85
