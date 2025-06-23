@@ -16,6 +16,7 @@ paths:
   label_csv: "e:/intern/outputs/reaction_time_labels.csv"
   merged_dataset: "e:/intern/outputs/merged_graph_features_with_labels.csv"
   graph_features_csv: "e:/intern/plv_graph_features_ALL_FILES.csv"
+  subjects_dir: C:/Users/user/mne_data/MNE-fsaverage-data
 
 preprocessing:
   sfp_path: "E:/intern/GSN_HydroCel_129.sfp"
@@ -38,3 +39,7 @@ params:
   window_size: 0.3 
   step_size: 0.05
   plv_threshold: 0.85
+
+source_localization:
+  parcellation: Schaefer2018_100Parcels_7Networks
+  hemi: both
