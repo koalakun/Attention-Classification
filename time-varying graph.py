@@ -2,177 +2,141 @@ import os
 import numpy as np
 import pandas as pd
 import networkx as nx
-from scipy.signal import hilbert
-import yaml
-import mne
 from tqdm import tqdm
+import yaml
 
-# ---------------- Load config ----------------
+# ------------------ Load Configuration ------------------
 with open("e:/intern/config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 source_dir = config["paths"]["features_dir"]
-epochs_dir = config["paths"]["epochs_dir"]
-output_dir = os.path.join(source_dir, "time_varying")
-os.makedirs(output_dir, exist_ok=True)
+plv_graph_features_dir = os.path.join(source_dir, "plv_graph_features")
 
-# Parameters
-sfreq = config.get("params", {}).get("sfreq", 1000)
-window_size = config.get("params", {}).get("window_size", 0.2)
-step_size = config.get("params", {}).get("step_size", 0.05)
-threshold = config.get("params", {}).get("plv_threshold", 0.9)  # strong edge definition
+sfreq = 500  # Sampling rate (Hz)
+window_size = 0.25  # seconds → 125 samples
+step_size = 0.1     # seconds → 50 samples
 
-window_samples = int(window_size * sfreq)
-step_samples = int(step_size * sfreq)
+# Ensure output directory exists
+os.makedirs(plv_graph_features_dir, exist_ok=True)
 
-# ---------------- PLV & Graph Functions ----------------
-def compute_plv(x1, x2):
-    phase_diff = np.angle(hilbert(x1)) - np.angle(hilbert(x2))
-    return np.abs(np.sum(np.exp(1j * phase_diff)) / len(x1))
+# ------------------ Main Processing ------------------
+all_features = []
 
-def graph_features(plv_matrix, threshold):
-    G = nx.from_numpy_array(plv_matrix)
-    G.remove_edges_from(nx.selfloop_edges(G))
+for filename in tqdm(os.listdir(source_dir)):
 
-    if not nx.is_connected(G):
-        largest_cc = max(nx.connected_components(G), key=len)
-        G = G.subgraph(largest_cc).copy()
-        print(f"      ⚠️ Graph not fully connected — using largest component with {len(G.nodes)} nodes")
+    # ---- Strict File Filtering ----
+    if not filename.endswith(".npy"):
+        continue
+    if "pre_stim" in filename or "channel" in filename:
+        print(f"⏭️ Skipping pre-processed file: {filename}")
+        continue
+    if not filename.startswith("source_"):
+        print(f"⏭️ Skipping unrelated file: {filename}")
+        continue
+
+    # ---- Load and Validate Data ----
+    file_path = os.path.join(source_dir, filename)
+    file_id = filename.replace("source_", "").replace(".npy", "")
 
     try:
-        degree_centrality = np.mean(list(nx.degree_centrality(G).values()))
-        betweenness = np.mean(list(nx.betweenness_centrality(G, weight='weight').values()))
-        clustering = np.mean(list(nx.clustering(G, weight='weight').values()))
-        efficiency = nx.global_efficiency(G)
-        return [degree_centrality, betweenness, clustering, efficiency]
-    except Exception as e:
-        print(f"    ❌ Graph feature extraction failed: {e}")
-        return None
+        data = np.load(file_path)
+        print(f"\n📊 {file_id}: loaded shape {data.shape}")
+        print(f"   NaNs: {np.isnan(data).sum()}, Max abs value: {np.max(np.abs(data)):.6f}")
 
-def filter_top_k_edges(plv_matrix, top_k=0.05):
-    n = plv_matrix.shape[0]
-    triu_indices = np.triu_indices(n, k=1)
-    plv_values = plv_matrix[triu_indices]
-    k_cutoff = int(len(plv_values) * top_k)
-    if k_cutoff < 1:
-        return np.zeros_like(plv_matrix)
-    # Get indices of top K values
-    top_k_idx = np.argpartition(plv_values, -k_cutoff)[-k_cutoff:]
-    adj_matrix = np.zeros_like(plv_matrix, dtype=int)
-    adj_matrix[triu_indices[0][top_k_idx], triu_indices[1][top_k_idx]] = 1
-    adj_matrix = adj_matrix + adj_matrix.T
-    np.fill_diagonal(adj_matrix, 0)
-    print(f"Edges kept: {adj_matrix.sum()//2} / {len(plv_values)}")
-    return adj_matrix
+        # ---- Handle epoched or continuous ----
+        if data.ndim == 3:  # (n_trials, n_parcels, n_times)
+            print(f"⚠️ Epoched data detected: {data.shape}, concatenating trials")
+            data = np.concatenate(data, axis=-1)
+            print(f"   After concatenation: {data.shape}")
+        elif data.ndim == 2:
+            print(f"✅ Continuous data detected: {data.shape}")
+        else:
+            print(f"❌ Unexpected shape {data.shape}, skipping")
+            continue
 
-def build_graph_from_top_k(plv_matrix, top_k=0.05):
-    n = plv_matrix.shape[0]
-    triu_indices = np.triu_indices(n, k=1)
-    plv_values = plv_matrix[triu_indices]
-    k_cutoff = int(len(plv_values) * top_k)
-    if k_cutoff < 1:
-        return None
-    # Get indices of top K values
-    top_k_idx = np.argpartition(plv_values, -k_cutoff)[-k_cutoff:]
-    # Build weighted edge list
-    edges = [(triu_indices[0][i], triu_indices[1][i], plv_values[top_k_idx[j]]) for j, i in enumerate(top_k_idx)]
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
-    G.add_weighted_edges_from(edges)
-    # Ensure connectivity
-    if not nx.is_connected(G):
-        largest_cc = max(nx.connected_components(G), key=len)
-        G = G.subgraph(largest_cc).copy()
-    return G
+        n_parcels, n_times = data.shape
+        w_size = int(window_size * sfreq)
+        s_size = int(step_size * sfreq)
+        n_windows = (n_times - w_size) // s_size + 1
 
-# ---------------- Main Loop ----------------
-file_list = sorted([f for f in os.listdir(source_dir) if f.startswith("source_") and f.endswith(".npy")])
+        print(f"   Window size: {w_size} samples")
+        print(f"   Step size: {s_size} samples")
+        print(f"   Time points: {n_times}, Calculated windows: {n_windows}")
 
-for source_file in tqdm(file_list, desc="Processing source files"):
-    file_id = source_file.replace("source_", "").replace(".npy", "")
-    source_path = os.path.join(source_dir, source_file)
-    epoch_path = os.path.join(epochs_dir, f"{file_id}_epo.fif")
+        if n_windows <= 0:
+            print(f"⚠️ Skipping {file_id} — insufficient time points ({n_times})")
+            continue
 
-    if not os.path.exists(source_path) or not os.path.exists(epoch_path):
-        print(f"❌ Missing files for {file_id}")
-        continue
+        file_features = []
 
-    print(f"\n✅ Processing {file_id}")
-    source_ts = np.load(source_path)
-    epochs = mne.read_epochs(epoch_path, preload=True)
-    n_trials = len(epochs)
-    epoch_length = epochs.get_data().shape[2]
+        for w in range(n_windows):
+            start = w * s_size
+            end = start + w_size
+            window_data = data[:, start:end]
 
-    if source_ts.shape[1] != n_trials * epoch_length:
-        print(f"❌ Shape mismatch for {file_id}")
-        continue
+            # Sanity check
+            if np.isnan(window_data).any() or np.max(np.abs(window_data)) == 0:
+                print(f"⚠️ Window {w} contains NaNs or zeros, skipping")
+                continue
 
-    source_reshaped = source_ts.reshape((n_trials, source_ts.shape[0], epoch_length))
-    file_rows = []
-
-    for trial_idx, trial_data in enumerate(source_reshaped):
-        print(f"\n🔍 Trial {trial_idx} — shape: {trial_data.shape}")
-        for start in range(0, trial_data.shape[1] - window_samples + 1, step_samples):
-            segment = trial_data[:, start:start + window_samples]
-            n_parcels = segment.shape[0]
+            # Compute PLV matrix
             plv_matrix = np.zeros((n_parcels, n_parcels))
-
             for i in range(n_parcels):
                 for j in range(i + 1, n_parcels):
-                    plv = compute_plv(segment[i], segment[j])
-                    plv_matrix[i, j] = plv_matrix[j, i] = plv
+                    phase_i = np.angle(np.exp(1j * np.angle(window_data[i])))
+                    phase_j = np.angle(np.exp(1j * np.angle(window_data[j])))
+                    plv = np.abs(np.mean(np.exp(1j * (phase_i - phase_j))))
+                    plv_matrix[i, j] = plv
+                    plv_matrix[j, i] = plv
 
-            non_zero_plvs = plv_matrix[np.triu_indices_from(plv_matrix, k=1)]
-            percentile = 95  # or 90 for a less strict threshold
-            threshold = np.percentile(non_zero_plvs, percentile)
+            # Validate matrix
+            if np.isnan(plv_matrix).any() or np.max(plv_matrix) == 0:
+                print(f"⚠️ Window {w}: PLV matrix invalid")
+                continue
 
-            # Apply threshold to create adjacency matrix:
-            adj_matrix = (plv_matrix >= threshold).astype(int)
-            np.fill_diagonal(adj_matrix, 0)
+            # Build graph + centrality
+            graph = nx.from_numpy_array(plv_matrix)
+            centrality = nx.degree_centrality(graph)
 
-            strong_edges = non_zero_plvs > threshold
-            density = np.sum(strong_edges) / len(non_zero_plvs)
+            t_start = start / sfreq
+            t_end = end / sfreq
 
-            print(f"      ➤ Window PLV stats: min={non_zero_plvs.min():.4f}, max={non_zero_plvs.max():.4f}, "
-                  f"mean={non_zero_plvs.mean():.4f}")
-            print(f"      ➤ Strong edges (> {threshold}): {np.sum(strong_edges)} / {len(non_zero_plvs)}")
-            print(f"      ➤ Edge density: {density:.4f}")
-
-            features = graph_features(plv_matrix, threshold)
-            if features:
-                row = {
+            for node, cent_val in centrality.items():
+                file_features.append({
                     "file_id": file_id,
-                    "trial": trial_idx,
-                    "window_start": start,
-                    "degree_centrality": features[0],
-                    "betweenness": features[1],
-                    "clustering": features[2],
-                    "efficiency": features[3],
-                    "edge_density": density,
-                    "plv_mean": non_zero_plvs.mean(),
-                }
-                file_rows.append(row)
+                    "window_idx": w,
+                    "t_start": t_start,
+                    "t_end": t_end,
+                    "node": node,
+                    "centrality": cent_val
+                })
 
-            G = build_graph_from_top_k(plv_matrix, top_k=0.05)
-            if G is not None and len(G) > 1:
-                features = graph_features(nx.to_numpy_array(G), threshold)
-                if features:
-                    row = {
-                        "file_id": file_id,
-                        "trial": trial_idx,
-                        "window_start": start,
-                        "degree_centrality": features[0],
-                        "betweenness": features[1],
-                        "clustering": features[2],
-                        "efficiency": features[3],
-                        "edge_density": density,
-                        "plv_mean": non_zero_plvs.mean(),
-                    }
-                    file_rows.append(row)
+        print(f"✔️ Extracted {len(file_features)} features from {file_id}")
 
-    if file_rows:
-        df = pd.DataFrame(file_rows)
-        df.to_csv(os.path.join(output_dir, f"graph_{file_id}.csv"), index=False)
-        print(f"\n✅ Saved: graph_{file_id}.csv")
-    else:
-        print(f"\n⚠️ No valid graph features for {file_id}")
+        if len(file_features) == 0:
+            print(f"⚠️ No features extracted from {file_id}, skipping CSV save.")
+            continue
+
+        # Save per-file CSV
+        df = pd.DataFrame(file_features)
+        csv_path = os.path.join(plv_graph_features_dir, f"{file_id}_graph.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"✅ Saved: {csv_path} ({len(df)} rows)")
+
+        all_features.extend(file_features)
+
+    except Exception as e:
+        print(f"❌ Error processing {file_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        continue
+
+# ------------------ Save Combined Output ------------------
+all_df = pd.DataFrame(all_features)
+all_csv_path = os.path.join(plv_graph_features_dir, "plv_graph_features_ALL_FILES.csv")
+all_df.to_csv(all_csv_path, index=False)
+
+print("\n🎯 PROCESSING COMPLETE!")
+print(f"✅ All features saved to: {all_csv_path}")
+print(f"📊 Total features extracted: {len(all_features)}")
+print(f"📁 Files processed: {len(all_df['file_id'].unique()) if not all_df.empty else 0}")

@@ -1,68 +1,67 @@
 import os
-import yaml
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from tqdm import tqdm
+import yaml
+from pathlib import Path
 
-# ---------------------- Load Config ----------------------
-with open("e:/intern/config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+# ========== Load config ==========
+try:
+    with open("e:/intern/config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    raise RuntimeError(f"❌ Failed to load config.yaml: {e}")
 
-print("✅ YAML loaded:")
-print("Top-level keys:", config.keys())
-print("Paths keys:", config["paths"].keys())
+behavioral_dirs = config["paths"]["behavioral_mat_dirs"]
+output_csv = os.path.join("e:/intern/outputs", "event_timeline.csv")  # update if needed
 
-# Load paths from config
-input_dirs = config["paths"]["behavioral_mat_dirs"]
-rt_save_path = config["paths"]["rt_csv"]
-label_save_path = config["paths"]["label_csv"]
+# ========== Collect All Events ==========
+event_log = []
 
-# ---------------------- Extract RTs ----------------------
-all_rts = []
+def extract_events(mat):
+    keys = mat.keys()
+    targ_key = [k for k in keys if "TargOnT" in k][0]
+    resp_key = [k for k in keys if "RespT" in k][0]
+    targont = mat[targ_key].flatten()
+    respt = mat[resp_key].flatten()
+    return targont, respt
 
-for folder in input_dirs:
-    for file in tqdm(os.listdir(folder), desc=f"Processing {folder}"):
-        if not file.endswith(".mat"):
-            continue
+# ========== Main ==========
+print("🔍 Extracting all TargOnT and RespT events...")
 
-        filepath = os.path.join(folder, file)
-        try:
-            mat = loadmat(filepath)
-        except Exception as e:
-            print(f"❌ Failed to load {file}: {e}")
-            continue
+mat_files = []
+for d in behavioral_dirs:
+    mat_files.extend([
+        os.path.join(d, f) for f in os.listdir(d)
+        if f.endswith(".mat")
+    ])
 
-        # Extract response and stimulus times if available
-        if 'RespT' in mat and 'TargOnT' in mat:
-            resp_times = np.array(mat['RespT']).flatten()
-            stim_times = np.array(mat['TargOnT']).flatten()
-            print(f"📊 {file} → {len(resp_times)} RespT | {len(stim_times)} TargOnT")
+for mat_file in tqdm(mat_files, desc="Processing files"):
+    try:
+        mat = loadmat(mat_file, simplify_cells=True)
+        file_id = Path(mat_file).stem
+        targont, respt = extract_events(mat)
 
-            n_trials = min(len(resp_times), len(stim_times))
-            for i in range(n_trials):
-                rt = (resp_times[i] - stim_times[i]) * 1000  # convert to milliseconds
-                all_rts.append({
-                    "file_id": os.path.splitext(file)[0],
-                    "trial": i,
-                    "stim_time": stim_times[i],
-                    "resp_time": resp_times[i],
-                    "rt": rt
-                })
-        else:
-            print(f"⚠️ No RT found in: {file}. Keys: {list(mat.keys())}")
+        for t in targont:
+            event_log.append({
+                "file_id": file_id,
+                "event_type": "TargOnT",
+                "timestamp": float(t)
+            })
 
-# ---------------------- Save RT CSV ----------------------
-rt_df = pd.DataFrame(all_rts)
+        for r in respt:
+            event_log.append({
+                "file_id": file_id,
+                "event_type": "RespT",
+                "timestamp": float(r)
+            })
 
-if rt_df.empty:
-    raise RuntimeError("❌ No reaction times extracted. Please check file contents.")
+    except Exception as e:
+        print(f"⚠️ Skipped {mat_file}: {e}")
+        continue
 
-rt_df.to_csv(rt_save_path, index=False)
-print(f"✅ Saved RTs to: {rt_save_path}")
-
-# ---------------------- Label Fast/Slow ----------------------
-median_rt = rt_df["rt"].median()
-rt_df["label"] = rt_df["rt"].apply(lambda x: "fast" if x < median_rt else "slow")
-rt_df.to_csv(label_save_path, index=False)
-print(f"✅ Saved labeled RTs to: {label_save_path}")
+# ========== Save ==========
+df = pd.DataFrame(event_log)
+df.to_csv(output_csv, index=False)
+print(f"✅ Saved all TargOnT and RespT events to: {output_csv}")
