@@ -16,6 +16,9 @@ paths:
   label_csv: "e:/intern/outputs/reaction_time_labels.csv"
   merged_dataset: "e:/intern/outputs/merged_graph_features_with_labels.csv"
   graph_features_csv: "e:/intern/plv_graph_features_ALL_FILES.csv"
+  graph_features_csv_dir: "e:/intern/features/plv_graph_features"
+  event_csv: "e:/intern/outputs/event_timeline.csv"
+  subjects_dir: "C:/Users/user/mne_data/MNE-fsaverage-data"
 
 preprocessing:
   sfp_path: "E:/intern/GSN_HydroCel_129.sfp"
@@ -30,11 +33,42 @@ preprocessing:
 
 epoching:
   tmin: -0.3
-  tmax: 0.0
-  baseline: [null, 0]
+  tmax: 1.5
+  baseline: [-0.3, 0]
 
 params:
   sfreq: 500
-  window_size: 0.3 
+  window_size: 0.3
   step_size: 0.05
   plv_threshold: 0.85
+
+source_localization:
+  parcellation: Schaefer2018_100Parcels_7Networks
+  hemi: both
+
+graph_window:
+  length_ms: 300
+  step_ms: 150
+  band: [4, 8]
+  threshold: 0.5
+  features: [degree, clustering, efficiency]
+  out_dir: e:/intern/features/plv_graph_features
+
+event_labels:
+  1: "Eyes Open"
+  2: "Eyes Closed"
+  5: "Response - Left_Yes"
+  8: "Response - Right_No"
+  9: "No Response"
+  11: "Visual Condition A"
+  12: "Stimulus Condition 1"
+  13: "Stimulus Condition 2"
+  82: "Feedback"
+  94: "End - Contrast Detection"
+  95: "End - Sequence Learning"
+  96: "End - Symbol Search"
+  100: "Movie 1 Start"
+  102: "Movie 2 Start"
+  111: "Movie 3 Start"
+  112: "Movie 4 Start"
+  9999: "Bad Segment"
